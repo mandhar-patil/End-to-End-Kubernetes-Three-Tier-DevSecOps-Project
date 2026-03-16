@@ -1,14 +1,13 @@
-FROM node:18-alpine
+FROM node:20-slim
 
 WORKDIR /usr/src/app
 
-# Update alpine packages
-RUN apk update && apk upgrade
-
 COPY package*.json ./
 
-RUN npm install
+RUN npm ci --omit=dev
 
 COPY . .
 
-CMD ["node", "index.js"]
+EXPOSE 3000
+
+CMD ["node","index.js"]
