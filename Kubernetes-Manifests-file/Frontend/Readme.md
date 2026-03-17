@@ -81,7 +81,7 @@ env:
 
 ## Step 3 — Dockerfile
 
-The frontend Dockerfile accepts `REACT_APP_BACKEND_URL` as a **build argument** so it can be passed at build time without hardcoding it in the image.
+The frontend Dockerfile accepts `REACT_APP_BACKEND_URL` as a **build argument** so it can be passed at build time without hardcoding it into the image.
 
 ```dockerfile
 FROM node:14
@@ -89,7 +89,8 @@ WORKDIR /usr/src/app
 COPY package*.json ./
 RUN npm install
 
-# Accept build arg and set as env var at build time
+# Accept build arg and set as env var
+# This gets baked into the React bundle at npm run build
 ARG REACT_APP_BACKEND_URL
 ENV REACT_APP_BACKEND_URL=$REACT_APP_BACKEND_URL
 
@@ -99,43 +100,10 @@ EXPOSE 3000
 CMD ["npm", "start"]
 ```
 
-### Build the image manually
-
-```bash
-docker build \
-  --build-arg REACT_APP_BACKEND_URL=http://<YOUR-ALB-ADDRESS>/api/tasks \
-  -t three-tier-frontend:latest .
-```
-
-### Build via Jenkins Pipeline
-
-Pass the ALB URL as a build argument inside the Jenkins pipeline `Docker Image Build` stage:
-
-```groovy
-stage('Docker Image Build') {
-    steps {
-        dir('Application-Code/frontend') {
-            sh 'docker system prune -f'
-            sh 'docker container prune -f'
-            sh '''
-                docker build \
-                  --build-arg REACT_APP_BACKEND_URL=http://<YOUR-ALB-ADDRESS>/api/tasks \
-                  -t ${AWS_ECR_REPO_NAME}:latest .
-            '''
-        }
-    }
-}
-```
-
-> **Tip:** Store the ALB URL as a Jenkins credential (`ALB_URL`) to avoid hardcoding it in the pipeline:
->
-> ```groovy
-> environment {
->     ALB_URL = credentials('ALB_URL')
-> }
-> // Then use:
-> sh 'docker build --build-arg REACT_APP_BACKEND_URL=${ALB_URL}/api/tasks -t ${AWS_ECR_REPO_NAME}:latest .'
-> ```
+> **How ARG vs ENV works:**
+> - `ARG` — available only during Docker build
+> - `ENV` — persists into the running container
+> - React reads `ENV` at `npm run build` and bakes it into the JS bundle
 
 ---
 
@@ -145,7 +113,7 @@ stage('Docker Image Build') {
 # Navigate to frontend source
 cd Application-Code/frontend
 
-# Build image with ALB URL
+# Build image — pass ALB URL as build argument
 docker build \
   --build-arg REACT_APP_BACKEND_URL=http://<YOUR-ALB-ADDRESS>/api/tasks \
   -t three-tier-frontend:latest .
@@ -206,7 +174,6 @@ curl http://<ALB-ADDRESS>/started
 ```
 
 Expected responses:
-
 ```
 / → HTTP 200 (React app HTML)
 /api/tasks → [] or list of tasks (JSON)
@@ -326,6 +293,56 @@ spec:
 
 ---
 
+## CI/CD Pipeline (Jenkins)
+
+The Jenkins pipeline automatically:
+1. Builds Docker image from `Application-Code/frontend`
+2. Passes `REACT_APP_BACKEND_URL` as `--build-arg`
+3. Pushes to ECR with `BUILD_NUMBER` as tag
+4. Updates `deployment.yaml` image tag in GitHub
+5. ArgoCD detects the change and redeploys automatically
+
+```
+Code Push → Jenkins Build → ECR Push → GitHub Update → ArgoCD Sync → Pod Redeploy
+```
+
+### Jenkins Pipeline — Docker Build Stage
+
+```groovy
+stage('Docker Image Build') {
+    steps {
+        dir('Application-Code/frontend') {
+            sh 'docker system prune -f'
+            sh 'docker container prune -f'
+            sh '''
+                docker build \
+                  --build-arg REACT_APP_BACKEND_URL=${ALB_URL}/api/tasks \
+                  -t ${AWS_ECR_REPO_NAME}:latest .
+            '''
+        }
+    }
+}
+```
+
+Store `ALB_URL` as a Jenkins credential:
+
+```
+Jenkins → Manage Jenkins → Credentials → Add
+Kind    : Secret text
+ID      : ALB_URL
+Value   : http://k8s-threetie-mainlb-xxxx.us-east-2.elb.amazonaws.com
+```
+
+Then reference in pipeline environment block:
+
+```groovy
+environment {
+    ALB_URL = credentials('ALB_URL')
+}
+```
+
+---
+
 ## Troubleshooting
 
 ### ADD TASK button does nothing
@@ -367,27 +384,12 @@ kubectl get svc -n three-tier
 
 ---
 
-## CI/CD Pipeline (Jenkins)
-
-The Jenkins pipeline automatically:
-1. Builds Docker image from `Application-Code/frontend`
-2. Passes `REACT_APP_BACKEND_URL` as `--build-arg` at build time
-3. Pushes to ECR with `BUILD_NUMBER` as tag
-4. Updates `deployment.yaml` image tag in GitHub
-5. ArgoCD detects the change and redeploys automatically
-
-```
-Code Push → Jenkins Build → ECR Push → GitHub Update → ArgoCD Sync → Pod Redeploy
-```
-
----
-
 ## Environment Variables Reference
 
 | Variable | Description | Example |
 |---|---|---|
 | `REACT_APP_BACKEND_URL` | Full URL to backend API tasks endpoint | `http://<ALB-URL>/api/tasks` |
 
-> **Note:** All `REACT_APP_*` variables are baked into the build at `npm run build` time.
-> Changing them requires a new Docker image build and redeployment.
-> Pass them using `--build-arg` in the Docker build command as shown in Step 3.
+> **Note:** All `REACT_APP_*` variables are baked into the build at `npm run build`.
+> Changing them requires passing a new `--build-arg` and rebuilding the Docker image.
+> The Dockerfile uses `ARG` + `ENV` to accept this value at build time.
