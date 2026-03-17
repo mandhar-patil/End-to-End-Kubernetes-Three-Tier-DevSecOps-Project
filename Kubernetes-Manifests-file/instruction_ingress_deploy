@@ -1,117 +1,133 @@
-markdown# AWS Load Balancer Controller Setup for EKS
+🔹 Step 0 — Set Variables
+CLUSTER_NAME=devsecops
+REGION=us-east-2
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
-## Prerequisites
-- EKS Cluster running
-- AWS CLI configured
-- kubectl configured
-- Helm installed
-- eksctl installed
 
----
 
-## Step 1 — Associate OIDC Provider
-```bash
+🔹 Step 1 — Associate OIDC Provider
 eksctl utils associate-iam-oidc-provider \
-  --cluster devsecops \
-  --region us-east-2 \
+  --cluster $CLUSTER_NAME \
+  --region $REGION \
   --approve
-```
 
----
 
-## Step 2 — Create IAM Policy
-```bash
-curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.1/docs/install/iam_policy.json
+
+🔹 Step 2 — Create IAM Policy (LATEST)
+curl -o iam_policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
 
 aws iam create-policy \
-  --policy-name AWSLoadBalancerControllerIAMPolicy \
+  --policy-name AWSLoadBalancerControllerIAMPolicy_v2 \
   --policy-document file://iam_policy.json
-```
 
-> **Note:** If you get `EntityAlreadyExists` error, skip this step and proceed to Step 3.
+If EntityAlreadyExists → skip
 
----
 
-## Step 3 — Create IAM Service Account
-```bash
+
+🔹 Step 3 — Create IAM Service Account (IRSA)
 eksctl create iamserviceaccount \
-  --cluster=devsecops \
+  --cluster=$CLUSTER_NAME \
   --namespace=kube-system \
   --name=aws-load-balancer-controller \
   --role-name AmazonEKSLoadBalancerControllerRole \
-  --attach-policy-arn=arn:aws:iam:::policy/AWSLoadBalancerControllerIAMPolicy \
-  --region us-east-2 \
+  --attach-policy-arn=arn:aws:iam::$ACCOUNT_ID:policy/AWSLoadBalancerControllerIAMPolicy_v2 \
+  --region $REGION \
   --approve \
   --override-existing-serviceaccounts
-```
 
----
 
-## Step 4 — Install AWS Load Balancer Controller
-```bash
+🔹 Step 4 — Install AWS Load Balancer Controller
 helm repo add eks https://aws.github.io/eks-charts
 helm repo update
 
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
   -n kube-system \
-  --set clusterName=devsecops \
+  --set clusterName=$CLUSTER_NAME \
   --set serviceAccount.create=false \
   --set serviceAccount.name=aws-load-balancer-controller \
-  --set region=us-east-2 \
+  --set region=$REGION \
   --set vpcId=$(aws eks describe-cluster \
-      --name devsecops \
-      --region us-east-2 \
+      --name $CLUSTER_NAME \
+      --region $REGION \
       --query "cluster.resourcesVpcConfig.vpcId" \
       --output text)
-```
 
-### Verify Controller is Running
-```bash
+
+
+🔹 Step 5 — Identify Public vs Private Subnets (VERY IMPORTANT ⚠️)
+Get VPC ID
+VPC_ID=$(aws eks describe-cluster \
+  --name $CLUSTER_NAME \
+  --region $REGION \
+  --query "cluster.resourcesVpcConfig.vpcId" \
+  --output text)
+List Subnets with Public Info
+aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=$VPC_ID" \
+  --query "Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone,Public:MapPublicIpOnLaunch}" \
+  --output table
+🔍 How to Identify
+Value	Meaning	Type
+Public = true	Internet accessible	✅ Public Subnet
+Public = false	Internal only	🔒 Private Subnet
+
+
+
+🔹 Step 6 — Tag Subnets (CRITICAL)
+
+✅ Tag PUBLIC Subnets (for internet-facing ALB)
+aws ec2 create-tags \
+  --resources <PUBLIC-SUBNET-1> <PUBLIC-SUBNET-2> \
+  --tags \
+    Key=kubernetes.io/role/elb,Value=1 \
+    Key=kubernetes.io/cluster/$CLUSTER_NAME,Value=owned
+
+
+✅ Tag PRIVATE Subnets (optional)
+aws ec2 create-tags \
+  --resources <PRIVATE-SUBNET-1> <PRIVATE-SUBNET-2> \
+  --tags \
+    Key=kubernetes.io/role/internal-elb,Value=1 \
+    Key=kubernetes.io/cluster/$CLUSTER_NAME,Value=owned
+
+
+
+🔹 Step 7 — Verify Controller
 kubectl get pods -n kube-system \
   -l app.kubernetes.io/name=aws-load-balancer-controller
 
-# Expected output:
-# NAME                                            READY   STATUS    RESTARTS   AGE
-# aws-load-balancer-controller-xxx                1/1     Running   0          1m
-# aws-load-balancer-controller-yyy                1/1     Running   0          1m
-```
+Expected:
+aws-load-balancer-controller-xxxxx   Running
 
----
 
-## Step 5 — Tag Public Subnets
-```bash
-# Get subnet IDs
-aws ec2 describe-subnets \
-  --filters "Name=vpc-id,Values=" \
-  --query "Subnets[*].{ID:SubnetId,AZ:AvailabilityZone,Public:MapPublicIpOnLaunch}" \
-  --output table
-
-# Tag public subnets
-aws ec2 create-tags \
-  --resources    \
-  --tags \
-    Key=kubernetes.io/role/elb,Value=1 \
-    Key=kubernetes.io/cluster/devsecops,Value=owned
-```
-
----
-
-## Step 6 — Create Namespace
-```bash
+🔹 Step 8 — Create Namespace
 kubectl create namespace three-tier
-```
 
----
 
-## Step 7 — Verify Services are Running
-```bash
+🔹 Step 9 — Verify Services
 kubectl get svc -n three-tier
 
-# Must show:
-# NAME       TYPE        CLUSTER-IP   PORT(S)
-# api        ClusterIP   x.x.x.x      3500/TCP
-# frontend   ClusterIP   x.x.x.x      3000/TCP
-```
+Must show:
+api → 3500
+frontend → 3000
 
----
+🔹 Step 10 — Apply Ingress
+kubectl apply -f ingress.yml
 
+
+🔹 Step 11 — Restart Controller (IMPORTANT)
+kubectl rollout restart deployment aws-load-balancer-controller -n kube-system
+
+
+🔹 Step 12 — Check Ingress
+kubectl get ingress -n three-tier
+
+
+✅ Expected Output
+ADDRESS: k8s-threetie-mainlb-xxxxx.us-east-2.elb.amazonaws.com
+
+
+🌐 Test Application
+http://<ALB-DNS>
+http://<ALB-DNS>/api
+http://<ALB-DNS>/healthz
