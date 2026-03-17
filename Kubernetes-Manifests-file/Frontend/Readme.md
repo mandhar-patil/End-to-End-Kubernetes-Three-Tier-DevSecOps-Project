@@ -79,14 +79,76 @@ env:
 
 ---
 
-## Step 3 — Build and Push Docker Image
+## Step 3 — Dockerfile
+
+The frontend Dockerfile accepts `REACT_APP_BACKEND_URL` as a **build argument** so it can be passed at build time without hardcoding it in the image.
+
+```dockerfile
+FROM node:14
+WORKDIR /usr/src/app
+COPY package*.json ./
+RUN npm install
+
+# Accept build arg and set as env var at build time
+ARG REACT_APP_BACKEND_URL
+ENV REACT_APP_BACKEND_URL=$REACT_APP_BACKEND_URL
+
+COPY . .
+RUN npm run build
+EXPOSE 3000
+CMD ["npm", "start"]
+```
+
+### Build the image manually
+
+```bash
+docker build \
+  --build-arg REACT_APP_BACKEND_URL=http://<YOUR-ALB-ADDRESS>/api/tasks \
+  -t three-tier-frontend:latest .
+```
+
+### Build via Jenkins Pipeline
+
+Pass the ALB URL as a build argument inside the Jenkins pipeline `Docker Image Build` stage:
+
+```groovy
+stage('Docker Image Build') {
+    steps {
+        dir('Application-Code/frontend') {
+            sh 'docker system prune -f'
+            sh 'docker container prune -f'
+            sh '''
+                docker build \
+                  --build-arg REACT_APP_BACKEND_URL=http://<YOUR-ALB-ADDRESS>/api/tasks \
+                  -t ${AWS_ECR_REPO_NAME}:latest .
+            '''
+        }
+    }
+}
+```
+
+> **Tip:** Store the ALB URL as a Jenkins credential (`ALB_URL`) to avoid hardcoding it in the pipeline:
+>
+> ```groovy
+> environment {
+>     ALB_URL = credentials('ALB_URL')
+> }
+> // Then use:
+> sh 'docker build --build-arg REACT_APP_BACKEND_URL=${ALB_URL}/api/tasks -t ${AWS_ECR_REPO_NAME}:latest .'
+> ```
+
+---
+
+## Step 4 — Build and Push Docker Image
 
 ```bash
 # Navigate to frontend source
 cd Application-Code/frontend
 
-# Build image
-docker build -t three-tier-frontend:latest .
+# Build image with ALB URL
+docker build \
+  --build-arg REACT_APP_BACKEND_URL=http://<YOUR-ALB-ADDRESS>/api/tasks \
+  -t three-tier-frontend:latest .
 
 # Login to ECR
 aws ecr get-login-password --region us-east-2 | \
@@ -102,7 +164,7 @@ docker push 986485678858.dkr.ecr.us-east-2.amazonaws.com/three-tier-frontend:lat
 
 ---
 
-## Step 4 — Deploy to Kubernetes
+## Step 5 — Deploy to Kubernetes
 
 ```bash
 # Apply frontend deployment and service
@@ -117,7 +179,7 @@ kubectl logs -n three-tier -l role=frontend
 
 ---
 
-## Step 5 — Apply Ingress
+## Step 6 — Apply Ingress
 
 ```bash
 kubectl apply -f Kubernetes-Manifests-file/ingress.yaml
@@ -128,7 +190,7 @@ kubectl get ingress -n three-tier -w
 
 ---
 
-## Step 6 — Verify End-to-End Connectivity
+## Step 7 — Verify End-to-End Connectivity
 
 ```bash
 # 1. Frontend loads
@@ -144,6 +206,7 @@ curl http://<ALB-ADDRESS>/started
 ```
 
 Expected responses:
+
 ```
 / → HTTP 200 (React app HTML)
 /api/tasks → [] or list of tasks (JSON)
@@ -308,9 +371,10 @@ kubectl get svc -n three-tier
 
 The Jenkins pipeline automatically:
 1. Builds Docker image from `Application-Code/frontend`
-2. Pushes to ECR with `BUILD_NUMBER` as tag
-3. Updates `deployment.yaml` image tag in GitHub
-4. ArgoCD detects the change and redeploys automatically
+2. Passes `REACT_APP_BACKEND_URL` as `--build-arg` at build time
+3. Pushes to ECR with `BUILD_NUMBER` as tag
+4. Updates `deployment.yaml` image tag in GitHub
+5. ArgoCD detects the change and redeploys automatically
 
 ```
 Code Push → Jenkins Build → ECR Push → GitHub Update → ArgoCD Sync → Pod Redeploy
@@ -324,5 +388,6 @@ Code Push → Jenkins Build → ECR Push → GitHub Update → ArgoCD Sync → P
 |---|---|---|
 | `REACT_APP_BACKEND_URL` | Full URL to backend API tasks endpoint | `http://<ALB-URL>/api/tasks` |
 
-> Note: All `REACT_APP_*` variables are baked into the build.
+> **Note:** All `REACT_APP_*` variables are baked into the build at `npm run build` time.
 > Changing them requires a new Docker image build and redeployment.
+> Pass them using `--build-arg` in the Docker build command as shown in Step 3.
